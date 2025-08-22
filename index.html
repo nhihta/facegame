@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Face-Expression Runner (JS + MediaPipe)</title>
+<style>
+  html,body{height:100%;margin:0;background:#0b0f1a;color:#e8eefc;font-family:system-ui,Segoe UI,Roboto,Arial}
+  #stage{display:block;width:100vw;height:100vh;background:linear-gradient(180deg,#10152a 0%, #0b0f1a 60%, #0b0f1a 60%, #0b0f1a 100%)}
+  .hud{position:fixed;left:12px;top:12px;background:rgba(0,0,0,.35);backdrop-filter: blur(6px);
+       padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.12);font-size:14px;line-height:1.45}
+  .hud b{color:#8bd1ff}
+  .cta{position:fixed;right:12px;top:12px;background:rgba(0,0,0,.35);padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.12)}
+  #overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;
+           background:rgba(0,0,0,.6);text-align:center;z-index:2}
+  #overlay.hide{display:none}
+  #overlay h1{margin:0 0 8px 0;font-size:28px}
+  #overlay p{margin:4px 0 10px 0;opacity:.9}
+  #overlay button{padding:10px 16px;border-radius:10px;border:0;background:#4aa6ff;color:white;font-weight:600;cursor:pointer}
+  #camPreview{position:fixed;right:12px;bottom:12px;width:180px;border-radius:12px;transform:scaleX(-1);
+              opacity:.85;border:1px solid rgba(255,255,255,.12)}
+  .note{position:fixed;left:12px;bottom:12px;font-size:12px;opacity:.75}
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+
+<div class="hud" id="hud">
+  <div><b>Biểu cảm → Điều khiển</b></div>
+  😄 Cười rộng → →  
+  😗 Chu môi → ←  
+  😮 Há miệng → Nhảy  
+  <div style="margin-top:6px">Trạng thái: <span id="state">Đang khởi tạo…</span></div>
+  <div>Score: <span id="score">0</span></div>
+  <div style="margin-top:6px;font-size:12px;opacity:.8">
+    Nhấn <b>R</b> để calibrate lại
+  </div>
+</div>
+
+<div class="cta">
+  <div style="font-size:13px;opacity:.9">Webcam preview</div>
+  <video id="camPreview" autoplay playsinline muted></video>
+</div>
+
+<div id="overlay">
+  <h1>Face-Expression Runner</h1>
+  <p>Cho phép truy cập camera, nhìn thẳng & giữ mặt bình thường để calibrate trong 3 giây.</p>
+  <button id="startBtn">Bắt đầu</button>
+</div>
+
+<video id="video" style="display:none" autoplay playsinline muted></video>
+
+<!-- MediaPipe libs -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+<script>
+(() => {
+  // ===== Canvas / Game =====
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  let W, H;
+  const resize = () => { W = canvas.width = innerWidth; H = canvas.height = innerHeight; };
+  addEventListener('resize', resize); resize();
+
+  // Player & world
+  const player = { x: 140, y: 0, r: 22, vx: 0, vy: 0, onGround:false, alive:true };
+  const GRAV = 0.9, FRICTION = 0.85, SPEED = 1.6, JUMP = 18;
+  const groundY = () => H - 120;
+  let obstacles = [];
+  let score = 0;
+
+  function spawnObstacle() {
+    const h = 30 + Math.random()*80;
+    obstacles.push({ x: W + 40, y: groundY()-h, w: 24 + Math.random()*30, h, passed:false, speed: 6 + Math.random()*2 });
+  }
+
+  // Spawn loop
+  let obsTimer = 0;
+
+  // ===== Face / Calibration =====
+  const stateEl = document.getElementById('state');
+  const scoreEl = document.getElementById('score');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const videoEl = document.getElementById('video');
+  const camPreview = document.getElementById('camPreview');
+
+  // Baselines captured during calibration
+  let baseline = { mouthOpen: 0, mouthWidth: 0 };
+  let calibrated = false;
+  let collecting = false;
+  const calibBuffer = [];
+
+  function dist(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return Math.hypot(dx,dy); }
+
+  // Indices used (MediaPipe FaceMesh):
+  // mouth top/bottom: 13, 14 ; mouth corners: 61, 291 ; outer eye corners: 33, 263
+  const IDX = { UPPER_LIP:13, LOWER_LIP:14, MOUTH_L:61, MOUTH_R:291, EYE_L:33, EYE_R:263 };
+
+  function calcRatios(landmarks){
+    const p = i => ({x: landmarks[i].x, y: landmarks[i].y});
+
+    const upper = p(IDX.UPPER_LIP), lower = p(IDX.LOWER_LIP);
+    const leftM = p(IDX.MOUTH_L), rightM = p(IDX.MOUTH_R);
+    const eyeL = p(IDX.EYE_L), eyeR = p(IDX.EYE_R);
+
+    const mouthOpen = dist(upper, lower) / dist(leftM, rightM); // mở miệng (cao/ rộng)
+    const mouthWidth = dist(leftM, rightM) / dist(eyeL, eyeR);   // cười rộng (rộng / khoảng cách 2 mắt)
+
+    return { mouthOpen, mouthWidth };
+  }
+
+  function startCalibration(){
+    calibrated = false; collecting = true; calibBuffer.length = 0;
+    stateEl.textContent = "Calibrate: giữ mặt bình thường (3s)…";
+    setTimeout(() => {
+      // average
+      const avg = (arr) => arr.reduce((a,b)=>a+b,0)/Math.max(arr.length,1);
+      baseline.mouthOpen = avg(calibBuffer.map(v=>v.mouthOpen)) || 0.04;
+      baseline.mouthWidth = avg(calibBuffer.map(v=>v.mouthWidth)) || 1.60;
+      calibrated = true; collecting = false;
+      stateEl.textContent = "Đã sẵn sàng! 😄 / 😗 / 😮";
+    }, 3000);
+  }
+
+  // ===== MediaPipe setup =====
+  let faceMesh, camera;
+  async function initMediaPipe(){
+    faceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+    faceMesh.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+    faceMesh.onResults(onResults);
+
+    // Mirror preview
+    camPreview.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+
+    camera = new Camera(videoEl, {
+      onFrame: async () => { await faceMesh.send({image: videoEl}); },
+      width: 640, height: 480
+    });
+    await camera.start();
+  }
+
+  let lastExpr = { left:false, right:false, jump:false };
+
+  function onResults(results){
+    if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+      stateEl.textContent = "Không thấy khuôn mặt…";
+      return;
+    }
+    const lm = results.multiFaceLandmarks[0];
+    const r = calcRatios(lm);
+
+    if (collecting) { calibBuffer.push(r); return; }
+
+    if (calibrated) {
+      // Thresholds (tùy chỉnh)
+      const OPEN_TH = baseline.mouthOpen + 0.035;   // há miệng
+      const SMILE_RIGHT_TH = baseline.mouthWidth + 0.08; // cười rộng
+      const POUT_LEFT_TH  = baseline.mouthWidth - 0.07;  // chu/mím môi
+
+      // Actions
+      const jump = r.mouthOpen > OPEN_TH;
+      const goRight = r.mouthWidth > SMILE_RIGHT_TH;
+      const goLeft  = r.mouthWidth < POUT_LEFT_TH;
+
+      lastExpr = { left: goLeft, right: goRight, jump };
+      stateEl.textContent = `${goLeft?'← ':''}${goRight?'→ ':''}${jump?'⤴ nhảy':''}` || 'Đã sẵn sàng!';
+
+      // Visual debug (optional): draw tiny mouth points on the canvas corner
+      // (skip to keep performance)
+    }
+  }
+
+  // ===== Game loop =====
+  function resetGame(){
+    player.x = 140; player.y = groundY()-player.r; player.vx=0; player.vy=0; player.alive=true; score=0;
+    obstacles.length = 0; obsTimer = 0;
+  }
+
+  function update(){
+    // Controls from expressions
+    if (player.alive){
+      if (lastExpr.right) player.vx += SPEED;
+      if (lastExpr.left)  player.vx -= SPEED;
+      if (lastExpr.jump && player.onGround){ player.vy = -JUMP; player.onGround=false; }
+    }
+
+    // Physics
+    player.vy += GRAV;
+    player.y += player.vy;
+    player.x += player.vx;
+    player.vx *= FRICTION;
+
+    // Ground
+    if (player.y + player.r > groundY()){
+      player.y = groundY() - player.r; player.vy = 0; player.onGround = true;
+    }
+
+    // Bounds
+    player.x = Math.max(player.r, Math.min(W - player.r, player.x));
+
+    // Obstacles
+    obsTimer -= 1;
+    if (obsTimer <= 0){ spawnObstacle(); obsTimer = 60 + Math.random()*60; }
+    obstacles.forEach(o => { o.x -= o.speed; });
+
+    // Remove passed & scoring
+    obstacles = obstacles.filter(o => o.x + o.w > -40);
+    obstacles.forEach(o => {
+      if (!o.passed && o.x + o.w < player.x){ o.passed = true; score += 1; scoreEl.textContent = score; }
+    });
+
+    // Collision
+    for (const o of obstacles){
+      if (player.x + player.r > o.x && player.x - player.r < o.x + o.w &&
+          player.y + player.r > o.y && player.y - player.r < o.y + o.h){
+        player.alive = false;
+      }
+    }
+  }
+
+  function render(){
+    // Background
+    ctx.clearRect(0,0,W,H);
+    // Stars
+    for (let i=0;i<40;i++){
+      const x = (i*97 + score*13)%W, y = (i*53)%H/2;
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(x, y, 2, 2);
+    }
+
+    // Ground
+    ctx.fillStyle = '#16213a';
+    ctx.fillRect(0, groundY(), W, H-groundY());
+    ctx.fillStyle = '#203058';
+    for (let i=0;i<W;i+=40) ctx.fillRect(i, groundY(), 24, 6);
+
+    // Obstacles
+    ctx.fillStyle = '#ff6b6b';
+    obstacles.forEach(o=>{
+      ctx.fillRect(o.x, o.y, o.w, o.h);
+    });
+
+    // Player
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
+    ctx.fillStyle = player.alive ? '#66e0a3' : '#999';
+    ctx.fill();
+    // Face on player
+    ctx.fillStyle = '#0b0f1a';
+    ctx.beginPath(); ctx.arc(player.x-7, player.y-4, 3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(player.x+7, player.y-4, 3, 0, Math.PI*2); ctx.fill();
+    ctx.fillRect(player.x-8, player.y+6, 16, 3);
+
+    if (!player.alive){
+      ctx.fillStyle = 'rgba(0,0,0,.55)';
+      ctx.fillRect(0,0,W,H);
+      ctx.fillStyle = '#fff';
+      ctx.textAlign='center';
+      ctx.font='700 28px system-ui';
+      ctx.fillText('Game Over', W/2, H/2 - 20);
+      ctx.font='16px system-ui';
+      ctx.fillText('😄 cười để chạy phải • 😗 chu môi để chạy trái • 😮 há miệng để nhảy', W/2, H/2 + 8);
+      ctx.fillText('Nhấn R để calibrate rồi chơi lại', W/2, H/2 + 34);
+    }
+  }
+
+  function tick(){
+    update();
+    render();
+    requestAnimationFrame(tick);
+  }
+
+  // ===== Controls =====
+  window.addEventListener('keydown', (e)=>{
+    if (e.key.toLowerCase()==='r'){
+      startCalibration();
+      resetGame();
+    }
+  });
+
+  // ===== Start flow =====
+  startBtn.addEventListener('click', async ()=>{
+    overlay.classList.add('hide');
+    await initMediaPipe();
+    resetGame();
+    startCalibration();
+    tick();
+  });
+})();
+</script>
+<div class="note">Tip: Chạy qua HTTPS/Live Server để trình duyệt cho phép camera.</div>
+</body>
+</html>

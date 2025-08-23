@@ -3,35 +3,35 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>AR Darts — Front Camera + Voice "BẮN"</title>
+  <title>AR Darts — Front Cam + Lip Trigger</title>
   <style>
     :root { --glass: rgba(255,255,255,.1); --line: rgba(255,255,255,.2); }
     html, body { margin:0; padding:0; height:100%; background:#000; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
     #app { position:relative; width:100%; height:100%; overflow:hidden; }
 
     /* Front camera feed (selfie) — mirror for natural interaction */
-    video#cam { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform: scaleX(-1); }
+    video#cam { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform: scaleX(-1); background:#111; }
 
     /* Drawing overlay */
     canvas#overlay { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
 
-    .topbar { position:absolute; top:0; left:0; right:0; display:flex; align-items:center; justify-content:space-between; gap:.5rem; padding:.6rem .8rem; color:#fff; background:linear-gradient(to bottom, rgba(0,0,0,.55), rgba(0,0,0,0)); }
+    .topbar { position:absolute; top:0; left:0; right:0; display:flex; align-items:center; justify-content:space-between; gap:.5rem; padding:.6rem .8rem; color:#fff; background:linear-gradient(to bottom, rgba(0,0,0,.55), rgba(0,0,0,0)); z-index:2; }
     .score { font-weight:800; font-size:1.1rem; }
     .chips { display:flex; gap:.35rem; flex-wrap:wrap; }
     .chip { background:var(--glass); border:1px solid var(--line); border-radius:999px; padding:.25rem .5rem; font-size:.9rem; }
 
-    .hud { position:absolute; left:0; right:0; bottom:0; display:flex; gap:.5rem; flex-wrap:wrap; justify-content:center; padding:.75rem; background:linear-gradient(to top, rgba(0,0,0,.55), rgba(0,0,0,0)); }
+    .hud { position:absolute; left:0; right:0; bottom:0; display:flex; gap:.5rem; flex-wrap:wrap; justify-content:center; padding:.75rem; background:linear-gradient(to top, rgba(0,0,0,.55), rgba(0,0,0,0)); z-index:2; }
     .btn { appearance:none; border:1px solid var(--line); background:var(--glass); color:#fff; padding:.55rem .85rem; border-radius:12px; font-weight:700; cursor:pointer; backdrop-filter: blur(4px); }
     .btn:disabled { opacity:.5; cursor:not-allowed; }
 
-    .big { font-size:1.05rem; padding:.7rem 1rem; border-radius:14px; }
+    .banner { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); color:#fff; text-align:center; background:rgba(0,0,0,.45); border:1px solid var(--line); padding:12px 16px; border-radius:12px; z-index:2; }
 
     .centerDot { position:absolute; top:50%; left:50%; width:8px; height:8px; transform:translate(-50%, -50%); border-radius:50%; background:rgba(255,255,255,.35); }
   </style>
 </head>
 <body>
   <div id="app">
-    <video id="cam" playsinline autoplay muted></video>
+    <video id="cam" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
     <div class="centerDot" aria-hidden="true"></div>
 
@@ -40,9 +40,9 @@
       <div class="chips">
         <span class="chip" id="modeChip">Chưa bật camera</span>
         <span class="chip" id="handChip">Tay: —</span>
+        <span class="chip" id="faceChip">Miệng: —</span>
         <span class="chip" id="fpsChip">FPS: —</span>
         <span class="chip" id="boardChip">Bia: cố định</span>
-        <span class="chip" id="voiceChip">Voice: tắt</span>
       </div>
     </div>
 
@@ -51,15 +51,16 @@
       <button class="btn" id="placeBtn">Đặt/di chuyển bia</button>
       <button class="btn" id="sizeMinus">Bia nhỏ</button>
       <button class="btn" id="sizePlus">Bia to</button>
-      <button class="btn" id="voiceBtn" class="big">Bật nghe từ "BẮN"</button>
-      <button class="btn big" id="shootBtn">BẮN (dự phòng)</button>
-      <button class="btn" id="debugBtn">Bật debug tay</button>
+      <button class="btn" id="debugBtn">Bật debug</button>
       <button class="btn" id="resetBtn">Reset điểm</button>
     </div>
+
+    <div class="banner" id="helpBanner">Nếu không thấy camera, hãy mở qua HTTPS (https://) và cấp quyền camera. Sau đó bấm "Bật camera trước".</div>
   </div>
 
-  <!-- MediaPipe Hands -->
+  <!-- MediaPipe Hands + FaceMesh -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.min.js"></script>
 
   <script>
@@ -67,11 +68,11 @@
   const video = $('#cam');
   const canvas = $('#overlay');
   const ctx = canvas.getContext('2d');
-  let W=0,H=0; const resize = () => { canvas.width=W=innerWidth; canvas.height=H=innerHeight; }; resize(); addEventListener('resize', resize);
+  let W=0,H=0; const resize = () => { canvas.width=W=innerWidth; canvas.height=H=innerHeight; drawBoard(); }; resize(); addEventListener('resize', resize);
 
-  const scoreEl=$('#score'), modeChip=$('#modeChip'), handChip=$('#handChip'), fpsChip=$('#fpsChip'), boardChip=$('#boardChip'), voiceChip=$('#voiceChip');
+  const scoreEl=$('#score'), modeChip=$('#modeChip'), handChip=$('#handChip'), faceChip=$('#faceChip'), fpsChip=$('#fpsChip'), boardChip=$('#boardChip');
   const startBtn=$('#startBtn'), placeBtn=$('#placeBtn'), sizeMinus=$('#sizeMinus'), sizePlus=$('#sizePlus'), debugBtn=$('#debugBtn'), resetBtn=$('#resetBtn');
-  const voiceBtn=$('#voiceBtn'), shootBtn=$('#shootBtn');
+  const helpBanner=$('#helpBanner');
 
   let totalScore=0, debug=false, placing=false;
   const MIRROR = true; // mirrored selfie display
@@ -82,20 +83,20 @@
 
   placeBtn.addEventListener('click',()=>{ placing=!placing; boardChip.textContent = placing? 'Bia: đang đặt' : 'Bia: cố định'; });
   addEventListener('click',(e)=>{ if(!placing) return; const r=canvas.getBoundingClientRect(); board.cx=(e.clientX-r.left)*(canvas.width/r.width); board.cy=(e.clientY-r.top)*(canvas.height/r.height); placing=false; boardChip.textContent='Bia: cố định'; });
-  sizeMinus.addEventListener('click',()=>{ board.R=Math.max(40, board.R*0.9); });
-  sizePlus.addEventListener('click',()=>{ board.R=Math.min(Math.min(W,H)*0.48, board.R*1.1); });
+  sizeMinus.addEventListener('click',()=>{ board.R=Math.max(40, board.R*0.9); drawBoard(); });
+  sizePlus.addEventListener('click',()=>{ board.R=Math.min(Math.min(W,H)*0.48, board.R*1.1); drawBoard(); });
 
   // ===== Camera =====
   async function startCamera(){
     try{
-      modeChip.textContent='Đang xin quyền camera…';
+      modeChip.textContent='Đang xin quyền camera…'; helpBanner.style.display='none';
       const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ ideal:'user' }, width:{ ideal:1280 }, height:{ ideal:720 }}, audio:false });
       video.srcObject=stream; await video.play(); modeChip.textContent='Camera trước đã bật'; loop();
-    }catch(err){ console.error(err); modeChip.textContent='Không bật được camera'; alert('Hãy chạy qua HTTPS và cho phép quyền camera.'); }
+    }catch(err){ console.error(err); modeChip.textContent='Không bật được camera'; helpBanner.textContent='Không bật được camera. Hãy dùng trình duyệt hỗ trợ (Chrome/Edge), đảm bảo HTTPS và cấp quyền.'; helpBanner.style.display='block'; }
   }
   startBtn.addEventListener('click', startCamera);
 
-  // ===== MediaPipe Hands =====
+  // ===== MediaPipe Hands (ngón trỏ) =====
   let hands=null; const handState={ lastTip:null, visible:false };
   function makeHands(){
     hands = new Hands({ locateFile: (f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
@@ -105,56 +106,83 @@
 
   function toCanvas(p){ const x=p.x*W, y=p.y*H; return MIRROR? {x:W-x, y}:{x,y}; }
 
+  // ===== MediaPipe FaceMesh (khẩu hình) =====
+  let faceMesh=null; const faceState={ mouthAR:0, lastShootT:0 };
+  function makeFace(){
+    faceMesh = new FaceMesh.FaceMesh({ locateFile: (f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
+    faceMesh.setOptions({ maxNumFaces:1, refineLandmarks:false, minDetectionConfidence:.5, minTrackingConfidence:.5 });
+    faceMesh.onResults(onFace);
+  } makeFace();
+
+  // Mouth Aspect Ratio (MAR) ~ khoảng cách môi trên-dưới / khoảng cách đuôi mắt 33-263
+  function computeMAR(lm){
+    const U=lm[13], L=lm[14]; // môi trên / dưới (trung tâm)
+    const LE=lm[33], RE=lm[263]; // đuôi mắt trái/phải
+    const mouth = Math.hypot(U.x-L.x, U.y-L.y);
+    const eye = Math.hypot(LE.x-RE.x, LE.y-RE.y) + 1e-6;
+    return mouth/eye; // thường ~0.02 (khép) → >0.08 (mở rộng)
+  }
+
   let lastFrameT=performance.now();
-  function onHand(res){
+  async function loop(){
+    if(!video.videoWidth){ requestAnimationFrame(loop); return; }
+    resize();
     const now=performance.now(); const dt=Math.max(1, now-lastFrameT)/1000; lastFrameT=now; fpsChip.textContent=`FPS: ${Math.round(1/dt)}`;
 
-    ctx.clearRect(0,0,W,H); vignette(); drawBoard();
+    // Gửi cùng một khung hình cho cả Hands và FaceMesh
+    await Promise.all([
+      hands.send({ image: video }),
+      faceMesh.send({ image: video })
+    ]);
 
+    // redraw board every frame (in case size changed)
+    // (onHand/onFace cũng vẽ)
+    requestAnimationFrame(loop);
+  }
+
+  function onHand(res){
+    // Không xoá canvas ở đây để không đè lên vẽ của Face; sẽ clear trong onFace
     if(res.multiHandLandmarks && res.multiHandLandmarks.length){
       const lm=res.multiHandLandmarks[0]; handState.visible=true; handChip.textContent='Tay: thấy';
-      const tip = toCanvas(lm[8]);
-      handState.lastTip = tip; // luôn cập nhật vị trí ngón trỏ mới nhất
-      if(debug){ drawHandDebug(lm, tip); }
+      handState.lastTip = toCanvas(lm[8]);
     } else { handState.visible=false; handChip.textContent='Tay: không thấy'; }
   }
 
-  function drawHandDebug(lm, tip){
-    ctx.save(); ctx.fillStyle='rgba(0,255,255,.35)';
-    for(const p of lm){ const q=toCanvas(p); ctx.beginPath(); ctx.arc(q.x,q.y,3,0,Math.PI*2); ctx.fill(); }
-    ctx.restore();
-    ctx.beginPath(); ctx.arc(tip.x, tip.y, 6, 0, Math.PI*2); ctx.fillStyle='rgba(0,255,0,.7)'; ctx.fill();
-  }
+  function onFace(res){
+    // Vẽ khung: nền + bia + debug
+    ctx.clearRect(0,0,W,H); vignette(); drawBoard();
 
-  // ===== Voice trigger: say "bắn" =====
-  let voiceActive=false, recog=null;
-  function supportsSpeech(){ return 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window; }
-  function startVoice(){
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition; if(!SR){ alert('Trình duyệt chưa hỗ trợ Web Speech API. Hãy dùng Chrome hoặc Edge mới.'); return; }
-    recog = new SR();
-    recog.lang='vi-VN'; recog.continuous=true; recog.interimResults=true;
-    recog.onstart=()=>{ voiceActive=true; voiceChip.textContent='Voice: đang nghe'; voiceBtn.textContent='Tắt nghe "BẮN"'; };
-    recog.onerror=(e)=>{ console.warn('Speech err', e.error); };
-    recog.onend=()=>{ voiceActive=false; voiceChip.textContent='Voice: tắt'; voiceBtn.textContent='Bật nghe từ "BẮN"'; };
-    recog.onresult=(ev)=>{
-      for(let i=ev.resultIndex; i<ev.results.length; i++){
-        if(ev.results[i].isFinal){
-          const text = ev.results[i][0].transcript || '';
-          if(hasShootWord(text)){ triggerShoot(); }
-        }
+    if(res.multiFaceLandmarks && res.multiFaceLandmarks.length){
+      const lm = res.multiFaceLandmarks[0];
+      faceState.mouthAR = computeMAR(lm);
+      faceChip.textContent = `Miệng: ${faceState.mouthAR.toFixed(2)}`;
+
+      // Điều kiện kích hoạt "bắn" chỉ bằng khẩu hình: MAR vượt ngưỡng + cooldown
+      const TH = 0.085; // ngưỡng mở miệng (tùy khuôn mặt/độ xa, có thể chỉnh)
+      const COOLDOWN = 600; // ms
+      if(faceState.mouthAR > TH && performance.now() - faceState.lastShootT > COOLDOWN){
+        faceState.lastShootT = performance.now();
+        triggerShoot();
       }
-    };
-    try{ recog.start(); }catch(e){ console.warn('start voice', e); }
-  }
-  function stopVoice(){ if(recog){ try{ recog.stop(); }catch{} }
-  function hasShootWord(t){
-    const norm = t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
-    // match "bắn", "ban", or phrases like "bắn đi", "bắn nào"
-    return /ban|ban di|ban nao|bắn/i.test(t) || /ban/.test(norm);
+
+      if(debug){ drawFaceDebug(lm); }
+    } else {
+      faceChip.textContent='Miệng: —';
+    }
+
+    // Vẽ chấm vào vị trí ngón trỏ để người chơi căn
+    if(handState.lastTip){
+      ctx.beginPath(); ctx.arc(handState.lastTip.x, handState.lastTip.y, 6, 0, Math.PI*2); ctx.fillStyle='rgba(0,255,0,.7)'; ctx.fill();
+    }
   }
 
-  voiceBtn.addEventListener('click', ()=>{ if(voiceActive) stopVoice(); else startVoice(); });
-  shootBtn.addEventListener('click', triggerShoot);
+  function drawFaceDebug(lm){
+    // Vẽ một số mốc quanh miệng (13,14) và mắt (33,263)
+    const pts=[13,14,33,263];
+    ctx.save(); ctx.fillStyle='rgba(255,0,200,.5)';
+    pts.forEach(i=>{ const p=toCanvas(lm[i]); ctx.beginPath(); ctx.arc(p.x,p.y,3,0,Math.PI*2); ctx.fill(); });
+    ctx.restore();
+  }
 
   function triggerShoot(){
     if(!handState.visible || !handState.lastTip){ modeChip.textContent='Không thấy tay để bắn'; return; }
@@ -201,12 +229,8 @@
   }
 
   function drawImpact(p0, p1){
-    // quick straight trail and halo at impact
-    ctx.clearRect(0,0,W,H); vignette(); drawBoard();
     ctx.beginPath(); ctx.moveTo(p0.x,p0.y); ctx.lineTo(p1.x,p1.y); ctx.strokeStyle='rgba(255,255,255,.6)'; ctx.lineWidth=2; ctx.stroke();
     ctx.beginPath(); ctx.arc(p1.x,p1.y,12,0,Math.PI*2); ctx.fillStyle='rgba(0,200,255,.9)'; ctx.fill(); ctx.strokeStyle='rgba(255,255,255,.7)'; ctx.lineWidth=2; ctx.stroke();
-    // brief halo
-    setTimeout(()=>{ ctx.beginPath(); ctx.arc(p1.x,p1.y,18,0,Math.PI*2); ctx.strokeStyle='rgba(0,200,255,.6)'; ctx.lineWidth=3; ctx.stroke(); }, 50);
   }
 
   function vignette(){
@@ -214,19 +238,7 @@
     g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,'rgba(0,0,0,.25)'); ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
   }
 
-  // ===== Main loop =====
-  async function loop(){
-    if(!video.videoWidth){ requestAnimationFrame(loop); return; }
-    resize();
-    await hands.send({ image: video });
-    requestAnimationFrame(loop);
-  }
-
-  // UI helpers
-  resetBtn.addEventListener('click',()=>{ totalScore=0; scoreEl.textContent='Điểm: 0'; });
-  debugBtn.addEventListener('click',()=>{ debug=!debug; debugBtn.textContent=debug?'Tắt debug tay':'Bật debug tay'; });
-
-  // Initial draw
+  // Draw a board initially so user always sees it
   drawBoard();
   </script>
 </body>

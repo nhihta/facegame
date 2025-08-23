@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>AR Darts — Front Cam + Lip Trigger</title>
+  <title>AR Darts — Front Cam + Lip Trigger (Fixed getUserMedia)</title>
   <style>
     :root { --glass: rgba(255,255,255,.1); --line: rgba(255,255,255,.2); }
     html, body { margin:0; padding:0; height:100%; background:#000; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
@@ -24,7 +24,7 @@
     .btn { appearance:none; border:1px solid var(--line); background:var(--glass); color:#fff; padding:.55rem .85rem; border-radius:12px; font-weight:700; cursor:pointer; backdrop-filter: blur(4px); }
     .btn:disabled { opacity:.5; cursor:not-allowed; }
 
-    .banner { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); color:#fff; text-align:center; background:rgba(0,0,0,.45); border:1px solid var(--line); padding:12px 16px; border-radius:12px; z-index:2; }
+    .banner { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); color:#fff; text-align:center; background:rgba(0,0,0,.45); border:1px solid var(--line); padding:12px 16px; border-radius:12px; z-index:2; max-width:min(92vw,640px); }
 
     .centerDot { position:absolute; top:50%; left:50%; width:8px; height:8px; transform:translate(-50%, -50%); border-radius:50%; background:rgba(255,255,255,.35); }
   </style>
@@ -55,7 +55,7 @@
       <button class="btn" id="resetBtn">Reset điểm</button>
     </div>
 
-    <div class="banner" id="helpBanner">Nếu không thấy camera, hãy mở qua HTTPS (https://) và cấp quyền camera. Sau đó bấm "Bật camera trước".</div>
+    <div class="banner" id="helpBanner">Nếu không thấy camera, hãy mở qua HTTPS (https://) hoặc http://localhost và cấp quyền camera. Sau đó bấm "Bật camera trước".</div>
   </div>
 
   <!-- MediaPipe Hands + FaceMesh -->
@@ -74,6 +74,11 @@
   const startBtn=$('#startBtn'), placeBtn=$('#placeBtn'), sizeMinus=$('#sizeMinus'), sizePlus=$('#sizePlus'), debugBtn=$('#debugBtn'), resetBtn=$('#resetBtn');
   const helpBanner=$('#helpBanner');
 
+  // Ensure flags for iOS Safari
+  video.setAttribute('playsinline','');
+  video.setAttribute('muted','');
+  video.muted = true;
+
   let totalScore=0, debug=false, placing=false;
   const MIRROR = true; // mirrored selfie display
 
@@ -82,45 +87,80 @@
   const SEG=[20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5];
 
   placeBtn.addEventListener('click',()=>{ placing=!placing; boardChip.textContent = placing? 'Bia: đang đặt' : 'Bia: cố định'; });
-  addEventListener('click',(e)=>{ if(!placing) return; const r=canvas.getBoundingClientRect(); board.cx=(e.clientX-r.left)*(canvas.width/r.width); board.cy=(e.clientY-r.top)*(canvas.height/r.height); placing=false; boardChip.textContent='Bia: cố định'; });
+  addEventListener('click',(e)=>{ if(!placing) return; const r=canvas.getBoundingClientRect(); board.cx=(e.clientX-r.left)*(canvas.width/r.width); board.cy=(e.clientY-r.top)*(canvas.height/r.height); placing=false; boardChip.textContent='Bia: cố định'; drawBoard(); });
   sizeMinus.addEventListener('click',()=>{ board.R=Math.max(40, board.R*0.9); drawBoard(); });
   sizePlus.addEventListener('click',()=>{ board.R=Math.min(Math.min(W,H)*0.48, board.R*1.1); drawBoard(); });
 
   // ===== Camera =====
+  startBtn.addEventListener('click', startCamera);
   async function startCamera(){
     try{
+      if (!('mediaDevices' in navigator) || !('getUserMedia' in navigator.mediaDevices)) {
+        throw new Error('Trình duyệt không hỗ trợ navigator.mediaDevices.getUserMedia');
+      }
+      if (!isSecureContext && location.hostname !== 'localhost') {
+        throw new Error('Trang không chạy trong bối cảnh an toàn (HTTPS). Hãy dùng https:// hoặc http://localhost');
+      }
       modeChip.textContent='Đang xin quyền camera…'; helpBanner.style.display='none';
-      const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ ideal:'user' }, width:{ ideal:1280 }, height:{ ideal:720 }}, audio:false });
-      video.srcObject=stream; await video.play(); modeChip.textContent='Camera trước đã bật'; loop();
-    }catch(err){ console.error(err); modeChip.textContent='Không bật được camera'; helpBanner.textContent='Không bật được camera. Hãy dùng trình duyệt hỗ trợ (Chrome/Edge), đảm bảo HTTPS và cấp quyền.'; helpBanner.style.display='block'; }
+
+      const constraintsPrimary = { video:{ facingMode:{ ideal:'user' }, width:{ ideal:1280 }, height:{ ideal:720 }}, audio:false };
+      const constraintsFallback = { video:true, audio:false };
+
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia(constraintsPrimary); }
+      catch (e1) {
+        console.warn('Primary constraints failed, retrying with fallback', e1);
+        stream = await navigator.mediaDevices.getUserMedia(constraintsFallback);
+      }
+
+      video.srcObject = stream;
+      await video.play();
+      modeChip.textContent='Camera trước đã bật';
+
+      if (!handsInited) initHands();
+      if (!faceInited) initFace();
+
+      loop();
+    }catch(err){
+      console.error('Camera error:', err);
+      let msg = 'Không bật được camera. ';
+      if (err && err.name === 'NotAllowedError') msg += 'Bạn đã từ chối quyền camera. Vào cài đặt trình duyệt và cấp lại quyền.';
+      else if (err && err.name === 'NotFoundError') msg += 'Không tìm thấy camera. Hãy kiểm tra thiết bị hoặc đóng ứng dụng khác đang dùng camera.';
+      else if (err && err.message) msg += err.message;
+      else msg += 'Hãy dùng Chrome/Edge mới, chạy qua HTTPS hoặc http://localhost, và cấp quyền.';
+      modeChip.textContent = msg;
+      helpBanner.textContent = msg;
+      helpBanner.style.display='block';
+    }
   }
-  startBtn.addEventListener('click', startCamera);
 
   // ===== MediaPipe Hands (ngón trỏ) =====
-  let hands=null; const handState={ lastTip:null, visible:false };
-  function makeHands(){
+  let hands=null, handsInited=false; const handState={ lastTip:null, visible:false };
+  function initHands(){
     hands = new Hands({ locateFile: (f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
     hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:.6, minTrackingConfidence:.6 });
     hands.onResults(onHand);
-  } makeHands();
+    handsInited=true;
+  }
 
   function toCanvas(p){ const x=p.x*W, y=p.y*H; return MIRROR? {x:W-x, y}:{x,y}; }
 
   // ===== MediaPipe FaceMesh (khẩu hình) =====
-  let faceMesh=null; const faceState={ mouthAR:0, lastShootT:0 };
-  function makeFace(){
+  let faceMesh=null, faceInited=false; const faceState={ mouthAR:0, lastShootT:0 };
+  function initFace(){
     faceMesh = new FaceMesh.FaceMesh({ locateFile: (f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
     faceMesh.setOptions({ maxNumFaces:1, refineLandmarks:false, minDetectionConfidence:.5, minTrackingConfidence:.5 });
     faceMesh.onResults(onFace);
-  } makeFace();
+    faceInited=true;
+  }
 
-  // Mouth Aspect Ratio (MAR) ~ khoảng cách môi trên-dưới / khoảng cách đuôi mắt 33-263
+  // Mouth Aspect Ratio (MAR)
   function computeMAR(lm){
     const U=lm[13], L=lm[14]; // môi trên / dưới (trung tâm)
     const LE=lm[33], RE=lm[263]; // đuôi mắt trái/phải
     const mouth = Math.hypot(U.x-L.x, U.y-L.y);
     const eye = Math.hypot(LE.x-RE.x, LE.y-RE.y) + 1e-6;
-    return mouth/eye; // thường ~0.02 (khép) → >0.08 (mở rộng)
+    return mouth/eye; // ~0.02 (khép) → >0.08 (mở rộng)
   }
 
   let lastFrameT=performance.now();
@@ -129,19 +169,15 @@
     resize();
     const now=performance.now(); const dt=Math.max(1, now-lastFrameT)/1000; lastFrameT=now; fpsChip.textContent=`FPS: ${Math.round(1/dt)}`;
 
-    // Gửi cùng một khung hình cho cả Hands và FaceMesh
     await Promise.all([
       hands.send({ image: video }),
       faceMesh.send({ image: video })
     ]);
 
-    // redraw board every frame (in case size changed)
-    // (onHand/onFace cũng vẽ)
     requestAnimationFrame(loop);
   }
 
   function onHand(res){
-    // Không xoá canvas ở đây để không đè lên vẽ của Face; sẽ clear trong onFace
     if(res.multiHandLandmarks && res.multiHandLandmarks.length){
       const lm=res.multiHandLandmarks[0]; handState.visible=true; handChip.textContent='Tay: thấy';
       handState.lastTip = toCanvas(lm[8]);
@@ -149,7 +185,6 @@
   }
 
   function onFace(res){
-    // Vẽ khung: nền + bia + debug
     ctx.clearRect(0,0,W,H); vignette(); drawBoard();
 
     if(res.multiFaceLandmarks && res.multiFaceLandmarks.length){
@@ -157,8 +192,7 @@
       faceState.mouthAR = computeMAR(lm);
       faceChip.textContent = `Miệng: ${faceState.mouthAR.toFixed(2)}`;
 
-      // Điều kiện kích hoạt "bắn" chỉ bằng khẩu hình: MAR vượt ngưỡng + cooldown
-      const TH = 0.085; // ngưỡng mở miệng (tùy khuôn mặt/độ xa, có thể chỉnh)
+      const TH = 0.085; // ngưỡng mở miệng
       const COOLDOWN = 600; // ms
       if(faceState.mouthAR > TH && performance.now() - faceState.lastShootT > COOLDOWN){
         faceState.lastShootT = performance.now();
@@ -170,14 +204,12 @@
       faceChip.textContent='Miệng: —';
     }
 
-    // Vẽ chấm vào vị trí ngón trỏ để người chơi căn
     if(handState.lastTip){
       ctx.beginPath(); ctx.arc(handState.lastTip.x, handState.lastTip.y, 6, 0, Math.PI*2); ctx.fillStyle='rgba(0,255,0,.7)'; ctx.fill();
     }
   }
 
   function drawFaceDebug(lm){
-    // Vẽ một số mốc quanh miệng (13,14) và mắt (33,263)
     const pts=[13,14,33,263];
     ctx.save(); ctx.fillStyle='rgba(255,0,200,.5)';
     pts.forEach(i=>{ const p=toCanvas(lm[i]); ctx.beginPath(); ctx.arc(p.x,p.y,3,0,Math.PI*2); ctx.fill(); });

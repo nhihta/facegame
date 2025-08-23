@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>AR Darts — Front Camera Hand Throw</title>
+  <title>AR Darts — Front Camera + Voice "BẮN"</title>
   <style>
     :root { --glass: rgba(255,255,255,.1); --line: rgba(255,255,255,.2); }
     html, body { margin:0; padding:0; height:100%; background:#000; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
@@ -24,6 +24,8 @@
     .btn { appearance:none; border:1px solid var(--line); background:var(--glass); color:#fff; padding:.55rem .85rem; border-radius:12px; font-weight:700; cursor:pointer; backdrop-filter: blur(4px); }
     .btn:disabled { opacity:.5; cursor:not-allowed; }
 
+    .big { font-size:1.05rem; padding:.7rem 1rem; border-radius:14px; }
+
     .centerDot { position:absolute; top:50%; left:50%; width:8px; height:8px; transform:translate(-50%, -50%); border-radius:50%; background:rgba(255,255,255,.35); }
   </style>
 </head>
@@ -40,6 +42,7 @@
         <span class="chip" id="handChip">Tay: —</span>
         <span class="chip" id="fpsChip">FPS: —</span>
         <span class="chip" id="boardChip">Bia: cố định</span>
+        <span class="chip" id="voiceChip">Voice: tắt</span>
       </div>
     </div>
 
@@ -48,12 +51,14 @@
       <button class="btn" id="placeBtn">Đặt/di chuyển bia</button>
       <button class="btn" id="sizeMinus">Bia nhỏ</button>
       <button class="btn" id="sizePlus">Bia to</button>
+      <button class="btn" id="voiceBtn" class="big">Bật nghe từ "BẮN"</button>
+      <button class="btn big" id="shootBtn">BẮN (dự phòng)</button>
       <button class="btn" id="debugBtn">Bật debug tay</button>
       <button class="btn" id="resetBtn">Reset điểm</button>
     </div>
   </div>
 
-  <!-- MediaPipe Hands (lightweight) -->
+  <!-- MediaPipe Hands -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.min.js"></script>
 
@@ -64,26 +69,21 @@
   const ctx = canvas.getContext('2d');
   let W=0,H=0; const resize = () => { canvas.width=W=innerWidth; canvas.height=H=innerHeight; }; resize(); addEventListener('resize', resize);
 
-  const scoreEl=$('#score'), modeChip=$('#modeChip'), handChip=$('#handChip'), fpsChip=$('#fpsChip'), boardChip=$('#boardChip');
+  const scoreEl=$('#score'), modeChip=$('#modeChip'), handChip=$('#handChip'), fpsChip=$('#fpsChip'), boardChip=$('#boardChip'), voiceChip=$('#voiceChip');
   const startBtn=$('#startBtn'), placeBtn=$('#placeBtn'), sizeMinus=$('#sizeMinus'), sizePlus=$('#sizePlus'), debugBtn=$('#debugBtn'), resetBtn=$('#resetBtn');
+  const voiceBtn=$('#voiceBtn'), shootBtn=$('#shootBtn');
 
   let totalScore=0, debug=false, placing=false;
-
-  // Mirror flag (because front camera is mirrored for display). We also mirror landmark → canvas mapping.
-  const MIRROR = true;
+  const MIRROR = true; // mirrored selfie display
 
   // ===== Dartboard (position + geometry) =====
-  const board = {
-    cx: W/2, cy: H/2, R: Math.min(W,H)*0.38,
-    rInnerBull: .05, rBull: .09, rTripleIn:.53, rTripleOut:.59, rDoubleIn:.88, rDoubleOut:.94,
-  };
+  const board = { cx: W/2, cy: H/2, R: Math.min(W,H)*0.38, rInnerBull:.05, rBull:.09, rTripleIn:.53, rTripleOut:.59, rDoubleIn:.88, rDoubleOut:.94 };
   const SEG=[20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5];
 
-  // Simple placement: tap to set center; buttons to resize
   placeBtn.addEventListener('click',()=>{ placing=!placing; boardChip.textContent = placing? 'Bia: đang đặt' : 'Bia: cố định'; });
   addEventListener('click',(e)=>{ if(!placing) return; const r=canvas.getBoundingClientRect(); board.cx=(e.clientX-r.left)*(canvas.width/r.width); board.cy=(e.clientY-r.top)*(canvas.height/r.height); placing=false; boardChip.textContent='Bia: cố định'; });
-  sizeMinus.addEventListener('click',()=>{ board.R*=0.9; });
-  sizePlus.addEventListener('click',()=>{ board.R*=1.1; });
+  sizeMinus.addEventListener('click',()=>{ board.R=Math.max(40, board.R*0.9); });
+  sizePlus.addEventListener('click',()=>{ board.R=Math.min(Math.min(W,H)*0.48, board.R*1.1); });
 
   // ===== Camera =====
   async function startCamera(){
@@ -96,91 +96,75 @@
   startBtn.addEventListener('click', startCamera);
 
   // ===== MediaPipe Hands =====
-  let hands=null; const handState={ lastOpen:0, lastTip:null, visible:false, history:[] };
+  let hands=null; const handState={ lastTip:null, visible:false };
   function makeHands(){
     hands = new Hands({ locateFile: (f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
     hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:.6, minTrackingConfidence:.6 });
     hands.onResults(onHand);
   } makeHands();
 
-  function toCanvas(p){
-    // Mirror X so landmarks align with mirrored video display
-    const x = p.x * W;
-    const y = p.y * H;
-    return MIRROR ? { x: W - x, y } : { x, y };
-  }
-  function openness(lm){
-    const wrist=lm[0], i5=lm[5], p17=lm[17];
-    const cx=(wrist.x+i5.x+p17.x)/3, cy=(wrist.y+i5.y+p17.y)/3; const ref=Math.hypot(i5.x-wrist.x,i5.y-wrist.y)+1e-6;
-    const tips=[8,12,16,20]; let s=0; for(const i of tips){ s+= Math.hypot(lm[i].x-cx,lm[i].y-cy)/ref; } return s/tips.length; // ~0.4(close)→~1.2(open)
-  }
+  function toCanvas(p){ const x=p.x*W, y=p.y*H; return MIRROR? {x:W-x, y}:{x,y}; }
 
   let lastFrameT=performance.now();
   function onHand(res){
     const now=performance.now(); const dt=Math.max(1, now-lastFrameT)/1000; lastFrameT=now; fpsChip.textContent=`FPS: ${Math.round(1/dt)}`;
 
-    // Clear + redraw background vignette + board
     ctx.clearRect(0,0,W,H); vignette(); drawBoard();
 
     if(res.multiHandLandmarks && res.multiHandLandmarks.length){
-      const lm=res.multiHandLandmarks[0]; handState.visible=true; handChip.textContent='Tay: Đang theo dõi';
+      const lm=res.multiHandLandmarks[0]; handState.visible=true; handChip.textContent='Tay: thấy';
       const tip = toCanvas(lm[8]);
-
-      // compute openness on normalized space (not mirrored)
-      const open = openness(lm);
-
-      // history for velocity (up to 8 samples)
-      handState.history.push({t:now, x:tip.x, y:tip.y}); if(handState.history.length>8) handState.history.shift();
-
-      // smoothed velocity from last 3 deltas
-      let vx=0, vy=0, n=0; for(let i=handState.history.length-1;i>=1 && n<3;i--){ const a=handState.history[i], b=handState.history[i-1]; const dt=(a.t-b.t)/1000; if(dt>0){ vx += (a.x-b.x)/dt; vy += (a.y-b.y)/dt; n++; } }
-      if(n>0){ vx/=n; vy/=n; }
-
-      const speed = Math.hypot(vx,vy);
-      const openDelta = open - handState.lastOpen;
-      const released = (open>0.95 && openDelta>0.15 && speed>700);
-
-      if(released){
-        const p0 = { x: tip.x, y: tip.y };
-        const v = { x: vx, y: vy };
-        const hit = rayCircleHit(p0, v, {x:board.cx, y:board.cy, r:board.rDoubleOut*board.R});
-        const pHit = hit || fallbackHit(p0);
-        registerThrow(p0, pHit);
-      }
-
-      if(debug){ drawHandDebug(lm, tip, vx, vy, open, speed); }
-
-      handState.lastOpen=open; handState.lastTip=tip;
-    } else {
-      handState.visible=false; handChip.textContent='Tay: Không thấy';
-    }
+      handState.lastTip = tip; // luôn cập nhật vị trí ngón trỏ mới nhất
+      if(debug){ drawHandDebug(lm, tip); }
+    } else { handState.visible=false; handChip.textContent='Tay: không thấy'; }
   }
 
-  function drawHandDebug(lm, tip, vx, vy, open, speed){
+  function drawHandDebug(lm, tip){
     ctx.save(); ctx.fillStyle='rgba(0,255,255,.35)';
     for(const p of lm){ const q=toCanvas(p); ctx.beginPath(); ctx.arc(q.x,q.y,3,0,Math.PI*2); ctx.fill(); }
     ctx.restore();
     ctx.beginPath(); ctx.arc(tip.x, tip.y, 6, 0, Math.PI*2); ctx.fillStyle='rgba(0,255,0,.7)'; ctx.fill();
-    ctx.beginPath(); ctx.moveTo(tip.x, tip.y); ctx.lineTo(tip.x + vx*0.15, tip.y + vy*0.15); ctx.strokeStyle='rgba(255,255,0,.9)'; ctx.lineWidth=2; ctx.stroke();
-    ctx.fillStyle='#fff'; ctx.font='12px system-ui'; ctx.fillText(`open=${open.toFixed(2)} speed=${Math.round(speed)}px/s`, 8, 16);
   }
 
-  function rayCircleHit(p0, v, circle){
-    const Cx=circle.x, Cy=circle.y, r=circle.r; const dx=p0.x-Cx, dy=p0.y-Cy;
-    const a = v.x*v.x + v.y*v.y; if(a<1e-6) return null;
-    const b = v.x*dx + v.y*dy;
-    const c = dx*dx + dy*dy - r*r;
-    const disc = b*b - a*c; if(disc < 0) return null;
-    const sqrtD = Math.sqrt(disc);
-    const t1 = (-b - sqrtD) / a; const t2 = (-b + sqrtD) / a;
-    const t = (t1>1/120 ? t1 : (t2>1/120 ? t2 : null));
-    if(t===null) return null;
-    return { x: p0.x + v.x*t, y: p0.y + v.y*t };
+  // ===== Voice trigger: say "bắn" =====
+  let voiceActive=false, recog=null;
+  function supportsSpeech(){ return 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window; }
+  function startVoice(){
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition; if(!SR){ alert('Trình duyệt chưa hỗ trợ Web Speech API. Hãy dùng Chrome hoặc Edge mới.'); return; }
+    recog = new SR();
+    recog.lang='vi-VN'; recog.continuous=true; recog.interimResults=true;
+    recog.onstart=()=>{ voiceActive=true; voiceChip.textContent='Voice: đang nghe'; voiceBtn.textContent='Tắt nghe "BẮN"'; };
+    recog.onerror=(e)=>{ console.warn('Speech err', e.error); };
+    recog.onend=()=>{ voiceActive=false; voiceChip.textContent='Voice: tắt'; voiceBtn.textContent='Bật nghe từ "BẮN"'; };
+    recog.onresult=(ev)=>{
+      for(let i=ev.resultIndex; i<ev.results.length; i++){
+        if(ev.results[i].isFinal){
+          const text = ev.results[i][0].transcript || '';
+          if(hasShootWord(text)){ triggerShoot(); }
+        }
+      }
+    };
+    try{ recog.start(); }catch(e){ console.warn('start voice', e); }
+  }
+  function stopVoice(){ if(recog){ try{ recog.stop(); }catch{} }
+  function hasShootWord(t){
+    const norm = t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+    // match "bắn", "ban", or phrases like "bắn đi", "bắn nào"
+    return /ban|ban di|ban nao|bắn/i.test(t) || /ban/.test(norm);
   }
 
-  function fallbackHit(p0){
-    const dx=p0.x-board.cx, dy=p0.y-board.cy; const d=Math.hypot(dx,dy); const R=board.rDoubleOut*board.R;
-    if(d<=R) return p0; const k=R/d; return { x: board.cx + dx*k, y: board.cy + dy*k };
+  voiceBtn.addEventListener('click', ()=>{ if(voiceActive) stopVoice(); else startVoice(); });
+  shootBtn.addEventListener('click', triggerShoot);
+
+  function triggerShoot(){
+    if(!handState.visible || !handState.lastTip){ modeChip.textContent='Không thấy tay để bắn'; return; }
+    const p = handState.lastTip; // dùng điểm ảnh hiện tại của ngón trỏ
+    const hit = clampToBoard(p);
+    registerThrow(p, hit);
+  }
+
+  function clampToBoard(p){
+    const dx=p.x-board.cx, dy=p.y-board.cy; const d=Math.hypot(dx,dy); const R=board.rDoubleOut*board.R; if(d<=R) return p; const k=R/d; return {x:board.cx+dx*k, y:board.cy+dy*k};
   }
 
   // ===== Board + scoring =====
@@ -213,18 +197,16 @@
 
   function registerThrow(p0, pHit){
     const res = polarScore(pHit.x, pHit.y); totalScore += res.score; scoreEl.textContent=`Điểm: ${totalScore}`; modeChip.textContent = `${res.ring} ${res.seg||''} → +${res.score}`.trim();
-    drawFlight(p0, pHit);
+    drawImpact(p0, pHit);
   }
 
-  function drawFlight(p0, p1){
-    const t0=performance.now(); const dur=220;
-    const anim=()=>{
-      const t=performance.now()-t0; const k=Math.min(1, t/dur); const x=p0.x+(p1.x-p0.x)*k; const y=p0.y+(p1.y-p0.y)*k;
-      ctx.clearRect(0,0,W,H); vignette(); drawBoard();
-      ctx.beginPath(); ctx.moveTo(p0.x,p0.y); ctx.lineTo(x,y); ctx.strokeStyle='rgba(255,255,255,.6)'; ctx.lineWidth=2; ctx.stroke();
-      ctx.beginPath(); ctx.arc(x,y,9,0,Math.PI*2); ctx.fillStyle='rgba(0,200,255,.9)'; ctx.fill(); ctx.strokeStyle='rgba(255,255,255,.7)'; ctx.lineWidth=2; ctx.stroke();
-      if(k<1) requestAnimationFrame(anim); else { ctx.beginPath(); ctx.arc(p1.x,p1.y,16,0,Math.PI*2); ctx.strokeStyle='rgba(0,200,255,.6)'; ctx.lineWidth=3; ctx.stroke(); }
-    }; requestAnimationFrame(anim);
+  function drawImpact(p0, p1){
+    // quick straight trail and halo at impact
+    ctx.clearRect(0,0,W,H); vignette(); drawBoard();
+    ctx.beginPath(); ctx.moveTo(p0.x,p0.y); ctx.lineTo(p1.x,p1.y); ctx.strokeStyle='rgba(255,255,255,.6)'; ctx.lineWidth=2; ctx.stroke();
+    ctx.beginPath(); ctx.arc(p1.x,p1.y,12,0,Math.PI*2); ctx.fillStyle='rgba(0,200,255,.9)'; ctx.fill(); ctx.strokeStyle='rgba(255,255,255,.7)'; ctx.lineWidth=2; ctx.stroke();
+    // brief halo
+    setTimeout(()=>{ ctx.beginPath(); ctx.arc(p1.x,p1.y,18,0,Math.PI*2); ctx.strokeStyle='rgba(0,200,255,.6)'; ctx.lineWidth=3; ctx.stroke(); }, 50);
   }
 
   function vignette(){

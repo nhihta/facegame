@@ -3,16 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>AR Darts — Front Camera Hand Throw</title>
+  <title>AR Darts — Front Camera Hand Throw (Pinch + Rounds/Undo/Sound)</title>
   <style>
     :root { --glass: rgba(255,255,255,.1); --line: rgba(255,255,255,.2); }
     html, body { margin:0; padding:0; height:100%; background:#000; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
     #app { position:relative; width:100%; height:100%; overflow:hidden; }
 
-    /* Front camera feed (selfie) — mirror for natural interaction */
     video#cam { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform: scaleX(-1); }
-
-    /* Drawing overlay */
     canvas#overlay { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
 
     .topbar { position:absolute; top:0; left:0; right:0; display:flex; align-items:center; justify-content:space-between; gap:.5rem; padding:.6rem .8rem; color:#fff; background:linear-gradient(to bottom, rgba(0,0,0,.55), rgba(0,0,0,0)); }
@@ -23,6 +20,11 @@
     .hud { position:absolute; left:0; right:0; bottom:0; display:flex; gap:.5rem; flex-wrap:wrap; justify-content:center; padding:.75rem; background:linear-gradient(to top, rgba(0,0,0,.55), rgba(0,0,0,0)); }
     .btn { appearance:none; border:1px solid var(--line); background:var(--glass); color:#fff; padding:.55rem .85rem; border-radius:12px; font-weight:700; cursor:pointer; backdrop-filter: blur(4px); }
     .btn:disabled { opacity:.5; cursor:not-allowed; }
+
+    .rightpanel { position:absolute; right:.6rem; top:3.2rem; width:min(38vw, 280px); background:rgba(0,0,0,.35); border:1px solid var(--line); border-radius:12px; color:#fff; padding:.6rem; backdrop-filter: blur(4px); }
+    .rightpanel h3 { margin:.2rem 0 .4rem; font-size:1rem; }
+    .statrow { display:flex; justify-content:space-between; margin:.15rem 0; font-size:.92rem; }
+    .dartlist { margin-top:.4rem; font-size:.9rem; max-height:28vh; overflow:auto; }
 
     .centerDot { position:absolute; top:50%; left:50%; width:8px; height:8px; transform:translate(-50%, -50%); border-radius:50%; background:rgba(255,255,255,.35); }
   </style>
@@ -40,7 +42,16 @@
         <span class="chip" id="handChip">Tay: —</span>
         <span class="chip" id="fpsChip">FPS: —</span>
         <span class="chip" id="boardChip">Bia: cố định</span>
+        <span class="chip" id="pinchChip">Pinch: —</span>
+        <span class="chip" id="turnChip">Lượt: 3/3</span>
       </div>
+    </div>
+
+    <div class="rightpanel" id="panel">
+      <h3>Bảng điểm</h3>
+      <div class="statrow"><span>Tổng</span><strong id="totalEl">0</strong></div>
+      <div class="statrow"><span>Lượt hiện tại</span><strong id="turnEl">0</strong></div>
+      <div class="dartlist" id="dartList"></div>
     </div>
 
     <div class="hud">
@@ -48,12 +59,13 @@
       <button class="btn" id="placeBtn">Đặt/di chuyển bia</button>
       <button class="btn" id="sizeMinus">Bia nhỏ</button>
       <button class="btn" id="sizePlus">Bia to</button>
+      <button class="btn" id="undoBtn">Hoàn tác mũi</button>
+      <button class="btn" id="nextTurnBtn">Kết thúc lượt</button>
       <button class="btn" id="debugBtn">Bật debug tay</button>
-      <button class="btn" id="resetBtn">Reset điểm</button>
+      <button class="btn" id="resetBtn">Reset game</button>
     </div>
   </div>
 
-  <!-- MediaPipe Hands (lightweight) -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.min.js"></script>
 
@@ -64,22 +76,29 @@
   const ctx = canvas.getContext('2d');
   let W=0,H=0; const resize = () => { canvas.width=W=innerWidth; canvas.height=H=innerHeight; }; resize(); addEventListener('resize', resize);
 
-  const scoreEl=$('#score'), modeChip=$('#modeChip'), handChip=$('#handChip'), fpsChip=$('#fpsChip'), boardChip=$('#boardChip');
+  const scoreEl=$('#score'), modeChip=$('#modeChip'), handChip=$('#handChip'), fpsChip=$('#fpsChip'), boardChip=$('#boardChip'), pinchChip=$('#pinchChip');
+  const totalEl=$('#totalEl'), turnEl=$('#turnEl'), turnChip=$('#turnChip'), dartList=$('#dartList');
   const startBtn=$('#startBtn'), placeBtn=$('#placeBtn'), sizeMinus=$('#sizeMinus'), sizePlus=$('#sizePlus'), debugBtn=$('#debugBtn'), resetBtn=$('#resetBtn');
+  const undoBtn=$('#undoBtn'), nextTurnBtn=$('#nextTurnBtn');
+
+  // WebAudio beep (không cần file âm thanh)
+  const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  function beep(freq=880, dur=120, type='sine', vol=0.2){
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.type=type; o.frequency.value=freq; g.gain.value=vol; o.connect(g); g.connect(audioCtx.destination); o.start(); setTimeout(()=>{ o.stop(); }, dur);
+  }
+  function fanfare(){ beep(523,120,'square',0.15); setTimeout(()=>beep(659,120,'square',0.15),120); setTimeout(()=>beep(784,160,'square',0.2),240); }
 
   let totalScore=0, debug=false, placing=false;
+  const impacts = []; // {x,y,label,score,ring,seg,turn}
+  let dartsLeft=3; let turnScore=0; let turnIndex=1;
 
-  // Mirror flag (because front camera is mirrored for display). We also mirror landmark → canvas mapping.
   const MIRROR = true;
 
-  // ===== Dartboard (position + geometry) =====
-  const board = {
-    cx: W/2, cy: H/2, R: Math.min(W,H)*0.38,
-    rInnerBull: .05, rBull: .09, rTripleIn:.53, rTripleOut:.59, rDoubleIn:.88, rDoubleOut:.94,
-  };
+  // ===== Dartboard =====
+  const board = { cx: W/2, cy: H/2, R: Math.min(W,H)*0.38, rInnerBull:.05, rBull:.09, rTripleIn:.53, rTripleOut:.59, rDoubleIn:.88, rDoubleOut:.94 };
   const SEG=[20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5];
 
-  // Simple placement: tap to set center; buttons to resize
   placeBtn.addEventListener('click',()=>{ placing=!placing; boardChip.textContent = placing? 'Bia: đang đặt' : 'Bia: cố định'; });
   addEventListener('click',(e)=>{ if(!placing) return; const r=canvas.getBoundingClientRect(); board.cx=(e.clientX-r.left)*(canvas.width/r.width); board.cy=(e.clientY-r.top)*(canvas.height/r.height); placing=false; boardChip.textContent='Bia: cố định'; });
   sizeMinus.addEventListener('click',()=>{ board.R*=0.9; });
@@ -95,95 +114,116 @@
   }
   startBtn.addEventListener('click', startCamera);
 
-  // ===== MediaPipe Hands =====
-  let hands=null; const handState={ lastOpen:0, lastTip:null, visible:false, history:[] };
+  // ===== Hands =====
+  let hands=null; const handState={ lastTip:null, visible:false, history:[], armed:false, lastPinch:1 };
   function makeHands(){
     hands = new Hands({ locateFile: (f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
     hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:.6, minTrackingConfidence:.6 });
     hands.onResults(onHand);
   } makeHands();
 
-  function toCanvas(p){
-    // Mirror X so landmarks align with mirrored video display
-    const x = p.x * W;
-    const y = p.y * H;
-    return MIRROR ? { x: W - x, y } : { x, y };
-  }
-  function openness(lm){
-    const wrist=lm[0], i5=lm[5], p17=lm[17];
-    const cx=(wrist.x+i5.x+p17.x)/3, cy=(wrist.y+i5.y+p17.y)/3; const ref=Math.hypot(i5.x-wrist.x,i5.y-wrist.y)+1e-6;
-    const tips=[8,12,16,20]; let s=0; for(const i of tips){ s+= Math.hypot(lm[i].x-cx,lm[i].y-cy)/ref; } return s/tips.length; // ~0.4(close)→~1.2(open)
+  function toCanvas(p){ const x=p.x*W, y=p.y*H; return MIRROR? {x:W-x, y}:{x,y}; }
+
+  function pinchNormalized(lm){
+    const iTip=lm[8], tTip=lm[4], wrist=lm[0], iMCP=lm[5];
+    const dTip=Math.hypot(iTip.x-tTip.x, iTip.y-tTip.y);
+    const dRef=Math.hypot(iMCP.x-wrist.x, iMCP.y-wrist.y)+1e-6;
+    return dTip/dRef; // nhỏ=kẹp, lớn=thả
   }
 
   let lastFrameT=performance.now();
   function onHand(res){
     const now=performance.now(); const dt=Math.max(1, now-lastFrameT)/1000; lastFrameT=now; fpsChip.textContent=`FPS: ${Math.round(1/dt)}`;
 
-    // Clear + redraw background vignette + board
-    ctx.clearRect(0,0,W,H); vignette(); drawBoard();
+    ctx.clearRect(0,0,W,H); vignette(); drawBoard(); drawImpacts(); drawHUD();
 
     if(res.multiHandLandmarks && res.multiHandLandmarks.length){
       const lm=res.multiHandLandmarks[0]; handState.visible=true; handChip.textContent='Tay: Đang theo dõi';
-      const tip = toCanvas(lm[8]);
+      const tip=toCanvas(lm[8]);
+      const pinch=pinchNormalized(lm);
 
-      // compute openness on normalized space (not mirrored)
-      const open = openness(lm);
-
-      // history for velocity (up to 8 samples)
       handState.history.push({t:now, x:tip.x, y:tip.y}); if(handState.history.length>8) handState.history.shift();
-
-      // smoothed velocity from last 3 deltas
       let vx=0, vy=0, n=0; for(let i=handState.history.length-1;i>=1 && n<3;i--){ const a=handState.history[i], b=handState.history[i-1]; const dt=(a.t-b.t)/1000; if(dt>0){ vx += (a.x-b.x)/dt; vy += (a.y-b.y)/dt; n++; } }
       if(n>0){ vx/=n; vy/=n; }
+      const speed=Math.hypot(vx,vy);
 
-      const speed = Math.hypot(vx,vy);
-      const openDelta = open - handState.lastOpen;
-      const released = (open>0.95 && openDelta>0.15 && speed>700);
+      pinchChip.textContent=`Pinch: ${pinch.toFixed(2)}`;
 
-      if(released){
-        const p0 = { x: tip.x, y: tip.y };
-        const v = { x: vx, y: vy };
-        const hit = rayCircleHit(p0, v, {x:board.cx, y:board.cy, r:board.rDoubleOut*board.R});
-        const pHit = hit || fallbackHit(p0);
-        registerThrow(p0, pHit);
+      const PINCH_CLOSED=0.25, PINCH_RELEASE=0.40, SPEED_MIN=450;
+      if(pinch < PINCH_CLOSED) handState.armed = true;
+      if(handState.armed && pinch > PINCH_RELEASE && speed > SPEED_MIN) {
+        fireThrow({x:tip.x,y:tip.y}, {x:vx,y:vy});
+        handState.armed = false;
       }
 
-      if(debug){ drawHandDebug(lm, tip, vx, vy, open, speed); }
-
-      handState.lastOpen=open; handState.lastTip=tip;
-    } else {
-      handState.visible=false; handChip.textContent='Tay: Không thấy';
-    }
+      if(debug){ drawHandDebug(lm, tip, vx, vy, pinch, speed); }
+      handState.lastTip=tip; handState.lastPinch=pinch;
+    } else { handState.visible=false; handChip.textContent='Tay: Không thấy'; }
   }
 
-  function drawHandDebug(lm, tip, vx, vy, open, speed){
-    ctx.save(); ctx.fillStyle='rgba(0,255,255,.35)';
-    for(const p of lm){ const q=toCanvas(p); ctx.beginPath(); ctx.arc(q.x,q.y,3,0,Math.PI*2); ctx.fill(); }
-    ctx.restore();
+  function drawHandDebug(lm, tip, vx, vy, pinch, speed){
+    ctx.save(); ctx.fillStyle='rgba(0,255,255,.35)'; for(const p of lm){ const q=toCanvas(p); ctx.beginPath(); ctx.arc(q.x,q.y,3,0,Math.PI*2); ctx.fill(); } ctx.restore();
     ctx.beginPath(); ctx.arc(tip.x, tip.y, 6, 0, Math.PI*2); ctx.fillStyle='rgba(0,255,0,.7)'; ctx.fill();
     ctx.beginPath(); ctx.moveTo(tip.x, tip.y); ctx.lineTo(tip.x + vx*0.15, tip.y + vy*0.15); ctx.strokeStyle='rgba(255,255,0,.9)'; ctx.lineWidth=2; ctx.stroke();
-    ctx.fillStyle='#fff'; ctx.font='12px system-ui'; ctx.fillText(`open=${open.toFixed(2)} speed=${Math.round(speed)}px/s`, 8, 16);
+    ctx.fillStyle='#fff'; ctx.font='12px system-ui'; ctx.fillText(`pinch=${pinch.toFixed(2)} speed=${Math.round(speed)}px/s`, 8, 16);
   }
 
   function rayCircleHit(p0, v, circle){
     const Cx=circle.x, Cy=circle.y, r=circle.r; const dx=p0.x-Cx, dy=p0.y-Cy;
-    const a = v.x*v.x + v.y*v.y; if(a<1e-6) return null;
-    const b = v.x*dx + v.y*dy;
-    const c = dx*dx + dy*dy - r*r;
-    const disc = b*b - a*c; if(disc < 0) return null;
-    const sqrtD = Math.sqrt(disc);
-    const t1 = (-b - sqrtD) / a; const t2 = (-b + sqrtD) / a;
-    const t = (t1>1/120 ? t1 : (t2>1/120 ? t2 : null));
-    if(t===null) return null;
-    return { x: p0.x + v.x*t, y: p0.y + v.y*t };
+    const a=v.x*v.x+v.y*v.y; if(a<1e-6) return null; const b=v.x*dx+v.y*dy; const c=dx*dx+dy*dy - r*r; const disc=b*b - a*c; if(disc<0) return null;
+    const sqrtD=Math.sqrt(disc); const t1=(-b - sqrtD)/a; const t2=(-b + sqrtD)/a; const t=(t1>1/120? t1 : (t2>1/120? t2 : null)); if(t===null) return null;
+    return { x:p0.x+v.x*t, y:p0.y+v.y*t };
+  }
+  function fallbackHit(p0){ const dx=p0.x-board.cx, dy=p0.y-board.cy; const d=Math.hypot(dx,dy); const R=board.rDoubleOut*board.R; if(d<=R) return p0; const k=R/d; return { x:board.cx+dx*k, y:board.cy+dy*k }; }
+
+  // ===== Scoring =====
+  function polarScore(x,y){
+    const cx=board.cx, cy=board.cy, R=board.R; const dx=x-cx, dy=y-cy; const r=Math.hypot(dx,dy);
+    if(r>board.rDoubleOut*R) return {score:0, ring:'MISS', seg:0};
+    if(r<=board.rInnerBull*R) return {score:50, ring:'INNER BULL', seg:25, mult:1};
+    if(r<=board.rBull*R) return {score:25, ring:'OUTER BULL', seg:25, mult:1};
+    let ang=Math.atan2(dy,dx); let deg=ang*180/Math.PI; let fromTop=(90+deg+360)%360; const segIndex=Math.floor((fromTop+9)/18)%20; const base=SEG[segIndex];
+    let mult=1, ring='SINGLE';
+    if(r>=board.rDoubleIn*R && r<=board.rDoubleOut*R){ mult=2; ring='DOUBLE'; }
+    else if(r>=board.rTripleIn*R && r<=board.rTripleOut*R){ mult=3; ring='TRIPLE'; }
+    return { score: base*mult, ring, seg: base, mult };
   }
 
-  function fallbackHit(p0){
-    const dx=p0.x-board.cx, dy=p0.y-board.cy; const d=Math.hypot(dx,dy); const R=board.rDoubleOut*board.R;
-    if(d<=R) return p0; const k=R/d; return { x: board.cx + dx*k, y: board.cy + dy*k };
+  function fireThrow(p0, v){
+    if(dartsLeft<=0){ modeChip.textContent='Hết lượt, bấm "Kết thúc lượt" để sang lượt mới'; beep(220,150,'sawtooth',0.15); return; }
+    const hit = rayCircleHit(p0, v, {x:board.cx, y:board.cy, r:board.rDoubleOut*board.R}) || fallbackHit(p0);
+    registerThrow(p0, hit);
   }
 
-  // ===== Board + scoring =====
+  function registerThrow(p0, pHit){
+    const res = polarScore(pHit.x, pHit.y);
+    totalScore += res.score; turnScore += res.score; dartsLeft -= 1;
+
+    // Âm thanh phản hồi
+    if(res.ring.includes('BULL')) { fanfare(); }
+    else if(res.ring==='TRIPLE') { beep(880,180,'square',0.18); }
+    else if(res.ring==='DOUBLE') { beep(660,140,'square',0.16); }
+    else if(res.score===0) { beep(200,160,'triangle',0.15); }
+    else { beep(520,120,'sine',0.12); }
+
+    scoreEl.textContent = `Điểm: ${totalScore}`;
+    totalEl.textContent = totalScore;
+    turnEl.textContent = turnScore;
+    turnChip.textContent = `Lượt: ${dartsLeft}/3`;
+
+    const label = `${res.ring}${res.seg? ' '+res.seg: ''} (+${res.score})`;
+    impacts.push({ x:pHit.x, y:pHit.y, label, score:res.score, ring:res.ring, seg:res.seg, turn:turnIndex });
+
+    drawFlight(p0, pHit);
+    renderDartList();
+  }
+
+  function renderDartList(){
+    dartList.innerHTML = impacts.slice(-12).map((d,i)=>{
+      return `<div>🎯 Lượt ${d.turn}: ${d.label}</div>`;
+    }).join('');
+  }
+
   function drawBoard(){
     const cx=board.cx, cy=board.cy, R=board.R;
     ctx.save(); ctx.shadowColor='rgba(0,0,0,.6)'; ctx.shadowBlur=20;
@@ -196,55 +236,43 @@
     for(let i=0;i<20;i++){ const a=(i/20)*Math.PI*2 - Math.PI/2; ctx.beginPath(); ctx.moveTo(cx+Math.cos(a)*board.rTripleOut*R, cy+Math.sin(a)*board.rTripleOut*R); ctx.lineTo(cx+Math.cos(a)*board.rDoubleOut*R, cy+Math.sin(a)*board.rDoubleOut*R); ctx.stroke(); }
     ctx.restore();
   }
+  function drawImpacts(){
+    for(const hit of impacts){
+      ctx.beginPath(); ctx.arc(hit.x, hit.y, 10, 0, Math.PI*2); ctx.fillStyle='rgba(0,200,255,.9)'; ctx.fill(); ctx.strokeStyle='rgba(255,255,255,.7)'; ctx.lineWidth=2; ctx.stroke();
+      if(hit.label){ ctx.font='12px system-ui'; ctx.fillStyle='#fff'; ctx.fillText(hit.label, hit.x+12, hit.y-12); }
+    }
+  }
+  function drawHUD(){ /* reserved for extra overlays */ }
+
   function circle(x,y,r,fill){ ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); if(fill){ ctx.fillStyle=fill; ctx.fill(); } }
   function ring(x,y,r1,r2,fill,stroke){ ctx.beginPath(); ctx.arc(x,y,r2,0,Math.PI*2); ctx.arc(x,y,r1,0,Math.PI*2,true); ctx.closePath(); if(fill){ ctx.fillStyle=fill; ctx.fill(); } if(stroke){ ctx.strokeStyle=stroke; ctx.lineWidth=2; ctx.stroke(); } }
 
-  function polarScore(x,y){
-    const cx=board.cx, cy=board.cy, R=board.R; const dx=x-cx, dy=y-cy; const r=Math.hypot(dx,dy);
-    if(r>board.rDoubleOut*R) return {score:0, ring:'MISS', seg:0};
-    if(r<=board.rInnerBull*R) return {score:50, ring:'INNER BULL', seg:25};
-    if(r<=board.rBull*R) return {score:25, ring:'OUTER BULL', seg:25};
-    let ang=Math.atan2(dy,dx); let deg=ang*180/Math.PI; let fromTop=(90+deg+360)%360; const segIndex=Math.floor((fromTop+9)/18)%20; const base=SEG[segIndex];
-    let mult=1, ring='SINGLE';
-    if(r>=board.rDoubleIn*R && r<=board.rDoubleOut*R){ mult=2; ring='DOUBLE'; }
-    else if(r>=board.rTripleIn*R && r<=board.rTripleOut*R){ mult=3; ring='TRIPLE'; }
-    return { score: base*mult, ring, seg: base };
-  }
-
-  function registerThrow(p0, pHit){
-    const res = polarScore(pHit.x, pHit.y); totalScore += res.score; scoreEl.textContent=`Điểm: ${totalScore}`; modeChip.textContent = `${res.ring} ${res.seg||''} → +${res.score}`.trim();
-    drawFlight(p0, pHit);
-  }
-
   function drawFlight(p0, p1){
-    const t0=performance.now(); const dur=220;
+    const t0=performance.now(); const dur=200;
     const anim=()=>{
       const t=performance.now()-t0; const k=Math.min(1, t/dur); const x=p0.x+(p1.x-p0.x)*k; const y=p0.y+(p1.y-p0.y)*k;
-      ctx.clearRect(0,0,W,H); vignette(); drawBoard();
+      ctx.clearRect(0,0,W,H); vignette(); drawBoard(); drawImpacts(); drawHUD();
       ctx.beginPath(); ctx.moveTo(p0.x,p0.y); ctx.lineTo(x,y); ctx.strokeStyle='rgba(255,255,255,.6)'; ctx.lineWidth=2; ctx.stroke();
-      ctx.beginPath(); ctx.arc(x,y,9,0,Math.PI*2); ctx.fillStyle='rgba(0,200,255,.9)'; ctx.fill(); ctx.strokeStyle='rgba(255,255,255,.7)'; ctx.lineWidth=2; ctx.stroke();
-      if(k<1) requestAnimationFrame(anim); else { ctx.beginPath(); ctx.arc(p1.x,p1.y,16,0,Math.PI*2); ctx.strokeStyle='rgba(0,200,255,.6)'; ctx.lineWidth=3; ctx.stroke(); }
+      ctx.beginPath(); ctx.arc(x,y,7,0,Math.PI*2); ctx.fillStyle='rgba(0,200,255,.9)'; ctx.fill(); ctx.strokeStyle='rgba(255,255,255,.7)'; ctx.lineWidth=2; ctx.stroke();
+      if(k<1) requestAnimationFrame(anim);
     }; requestAnimationFrame(anim);
   }
 
-  function vignette(){
-    const g=ctx.createRadialGradient(W/2,H/2,Math.max(W,H)*.1, W/2,H/2,Math.max(W,H)*.7);
-    g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,'rgba(0,0,0,.25)'); ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
-  }
+  function vignette(){ const g=ctx.createRadialGradient(W/2,H/2,Math.max(W,H)*.1, W/2,H/2,Math.max(W,H)*.7); g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,'rgba(0,0,0,.25)'); ctx.fillStyle=g; ctx.fillRect(0,0,W,H); }
 
   // ===== Main loop =====
-  async function loop(){
-    if(!video.videoWidth){ requestAnimationFrame(loop); return; }
-    resize();
-    await hands.send({ image: video });
-    requestAnimationFrame(loop);
-  }
+  async function loop(){ if(!video.videoWidth){ requestAnimationFrame(loop); return; } resize(); await hands.send({ image: video }); requestAnimationFrame(loop); }
 
-  // UI helpers
-  resetBtn.addEventListener('click',()=>{ totalScore=0; scoreEl.textContent='Điểm: 0'; });
-  debugBtn.addEventListener('click',()=>{ debug=!debug; debugBtn.textContent=debug?'Tắt debug tay':'Bật debug tay'; });
+  // Game controls
+  resetBtn.addEventListener('click',()=>{ totalScore=0; turnScore=0; dartsLeft=3; turnIndex=1; impacts.length=0; updateTurnUI(); scoreEl.textContent='Điểm: 0'; totalEl.textContent='0'; turnEl.textContent='0'; });
+  function updateTurnUI(){ turnChip.textContent=`Lượt: ${dartsLeft}/3`; }
+  nextTurnBtn.addEventListener('click',()=>{ dartsLeft=3; turnScore=0; turnIndex++; updateTurnUI(); beep(480,100,'sine',0.12); });
+  undoBtn.addEventListener('click',()=>{
+    // Tìm mũi gần nhất thuộc lượt hiện tại
+    for(let i=impacts.length-1;i>=0;i--){ const d=impacts[i]; if(d.turn===turnIndex){ impacts.splice(i,1); totalScore-=d.score; turnScore-=d.score; scoreEl.textContent=`Điểm: ${totalScore}`; totalEl.textContent=totalScore; turnEl.textContent=turnScore; if(dartsLeft<3) dartsLeft++; updateTurnUI(); beep(300,120,'triangle',0.12); break; } }
+  });
 
-  // Initial draw
+  updateTurnUI();
   drawBoard();
   </script>
 </body>

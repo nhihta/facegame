@@ -1,217 +1,261 @@
+// ================= PHASER CONFIG =================
 const config = {
-    type: Phaser.AUTO,
+    type: Phaser.WEBGL,
     width: 360,
     height: 640,
-    pixelArt: true,
+    parent: document.body,
+    backgroundColor: '#2d2d2d',
+    scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH
+    },
     scene: { preload, create }
 };
 
-new Phaser.Game(config);
+const game = new Phaser.Game(config);
 
-// ================= CONFIG =================
+// ================= CONSTANTS =================
 const ROWS = 6;
 const COLS = 5;
 const CELL = 56;
 const GAP = 6;
-const OFFSET_X = (360 - COLS * (CELL + GAP)) / 2;
-const OFFSET_Y = 110;
+
+// Tính toán offset
+const BOARD_WIDTH = COLS * CELL + (COLS - 1) * GAP;
+const OFFSET_X = (360 - BOARD_WIDTH) / 2 + CELL / 2;
+const OFFSET_Y = 130 + CELL / 2;
 
 const TOTAL_TIME = 120;
 const BAR_WIDTH = 240;
 const BAR_X = 60;
-const BAR_Y = 50;
+const BAR_Y = 60;
 const MAX_HINT = 3;
 
 // ================= STATE =================
 let first = null;
 let second = null;
 let lock = false;
-
 let matchedPairs = 0;
 let score = 0;
 let scoreText;
-
 let timeLeft = TOTAL_TIME;
 let timerEvent;
 let timeBarGfx;
-
 let hintLeft = MAX_HINT;
 let hintText;
 
-let bgm, sfxMatch, sfxWrong;
-
-// ================= UTILS =================
-function fitToCell(img, size) {
-    const scale = Math.floor((size / img.width) * 100) / 100;
-    img.setScale(scale);
-}
-
-// ================= PHASER =================
+// ================= PRELOAD =================
 function preload() {
-    this.load.image('back', 'assets/back.png');
-    for (let i = 1; i <= 20; i++) {
-        this.load.image(`food${i}`, `assets/food${i}.jpeg`);
+    // 1. Load Hình ảnh
+    this.load.image('backBig', 'assets/back.png');
+    for (let i = 1; i <= 16; i++) {
+        this.load.image(`food${i}`, `assets/food${i}.png`);
     }
 
+    // 2. Load Âm thanh (Audio)
     this.load.audio('bgm', 'assets/bgm.mp3');
     this.load.audio('match', 'assets/match.mp3');
     this.load.audio('wrong', 'assets/wrong.mp3');
 }
 
+// ================= HELPERS: XỬ LÝ ẢNH =================
+function prepareBackFrames(scene) {
+    if (!scene.textures.exists('backBig')) {
+        createFallbackTexture(scene);
+        return;
+    }
+
+    const texture = scene.textures.get('backBig');
+    const source = texture.getSourceImage();
+
+    if (!source || source.width === 0) {
+        createFallbackTexture(scene);
+        return;
+    }
+
+    const imgW = source.width;
+    const imgH = source.height;
+    const stepX = imgW / COLS;
+    const stepY = imgH / ROWS;
+
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            texture.add(
+                `piece_${r}_${c}`,
+                0,
+                c * stepX, r * stepY,
+                stepX, stepY
+            );
+        }
+    }
+}
+
+function createFallbackTexture(scene) {
+    if (!scene.textures.exists('fallback_bg')) {
+        const graphics = scene.make.graphics({ add: false });
+        graphics.fillStyle(0x2ecc71);
+        graphics.fillRect(0, 0, CELL, CELL);
+        graphics.lineStyle(2, 0xffffff);
+        graphics.strokeRect(0, 0, CELL, CELL);
+        graphics.generateTexture('fallback_bg', CELL, CELL);
+    }
+}
+
+// ================= CREATE =================
 function create() {
-    // ===== SCORE =====
-    scoreText = this.add.text(16, 18, 'Score: 0', {
-        fontSize: '18px',
-        fill: '#fff'
-    });
+    resetGameState();
 
-    // ===== HINT =====
-    hintText = this.add.text(260, 18, `Hint: ${hintLeft}`, {
-        fontSize: '18px',
-        fill: '#00ffff'
-    }).setInteractive();
+    // --- ÂM THANH: Phát nhạc nền ---
+    // Kiểm tra để tránh lỗi trình duyệt chặn autoplay
+    if (!this.sound.get('bgm')) {
+        this.sound.play('bgm', {
+            loop: true,
+            volume: 0.5 // Âm lượng 50%
+        });
+    } else if (!this.sound.get('bgm').isPlaying) {
+        this.sound.play('bgm', { loop: true, volume: 0.5 });
+    }
 
-    hintText.on('pointerdown', () => useHint.call(this));
+    createUI.call(this);
+    prepareBackFrames(this);
+    createBoard.call(this);
 
-    // ===== TIME BAR BACKGROUND =====
-    this.add.rectangle(BAR_X, BAR_Y, BAR_WIDTH, 12, 0x222222).setOrigin(0);
-
-    // ===== TIME BAR GRAPHICS =====
-    timeBarGfx = this.add.graphics();
-    drawTimeBar(this);
-
-    // ===== TIMER =====
+    if (timerEvent) timerEvent.remove();
     timerEvent = this.time.addEvent({
         delay: 1000,
-        loop: true,
         callback: updateTime,
-        callbackScope: this
+        callbackScope: this,
+        loop: true
     });
+}
 
-    // ===== SOUND =====
-    bgm = this.sound.add('bgm', { loop: true, volume: 0.4 });
-    sfxMatch = this.sound.add('match', { volume: 0.8 });
-    sfxWrong = this.sound.add('wrong', { volume: 0.8 });
-    bgm.play();
+function resetGameState() {
+    first = null;
+    second = null;
+    lock = false;
+    matchedPairs = 0;
+    score = 0;
+    timeLeft = TOTAL_TIME;
+    hintLeft = MAX_HINT;
+}
 
-    // ===== CARD VALUES (16 PAIRS = 32 CARDS) =====
+function createUI() {
+    scoreText = this.add.text(20, 20, 'Score: 0', { fontSize: '24px', fill: '#fff', fontStyle: 'bold' });
+
+    hintText = this.add.text(340, 20, 'Hint: ' + MAX_HINT, { fontSize: '24px', fill: '#fff', fontStyle: 'bold' })
+        .setOrigin(1, 0).setInteractive();
+    hintText.on('pointerdown', () => useHint.call(this));
+
+    timeBarGfx = this.add.graphics();
+    drawTimeBar(this);
+}
+
+function createBoard() {
     const values = [];
-    for (let i = 1; i <= 16; i++) {
+    for (let i = 1; i <= 15; i++) {
         values.push(`food${i}`, `food${i}`);
     }
     Phaser.Utils.Array.Shuffle(values);
 
     let idx = 0;
+    const texture = this.textures.get('backBig');
+    const hasFrames = texture && texture.has('piece_0_0');
 
     for (let r = 0; r < ROWS; r++) {
         for (let c = 0; c < COLS; c++) {
-            const x = OFFSET_X + c * (CELL + GAP) + CELL / 2;
-            const y = OFFSET_Y + r * (CELL + GAP) + CELL / 2;
+            const x = OFFSET_X + c * (CELL + GAP);
+            const y = OFFSET_Y + r * (CELL + GAP);
 
-            const card = this.add.image(x, y, 'back')
+            let textureKey = hasFrames ? 'backBig' : 'fallback_bg';
+            let frameKey = hasFrames ? `piece_${r}_${c}` : null;
+
+            const card = this.add.image(x, y, textureKey, frameKey)
+                .setDisplaySize(CELL, CELL)
                 .setInteractive()
                 .setData({
                     value: values[idx],
                     flipped: false,
-                    removed: false
+                    removed: false,
+                    baseTexture: textureKey,
+                    baseFrame: frameKey
                 });
 
-            fitToCell(card, CELL);
             card.on('pointerdown', () => flipCard.call(this, card));
             idx++;
         }
     }
 }
 
-// ================= TIME BAR =================
+// ================= TIME =================
 function drawTimeBar(scene) {
+    if (!timeBarGfx) return;
     const percent = Phaser.Math.Clamp(timeLeft / TOTAL_TIME, 0, 1);
-    const width = BAR_WIDTH * percent;
-
-    let color;
-    if (percent > 0.66) {
-        color = Phaser.Display.Color.Interpolate.ColorWithColor(
-            new Phaser.Display.Color(0, 255, 0),
-            new Phaser.Display.Color(255, 255, 0),
-            1,
-            (1 - percent) / 0.34
-        );
-    } else if (percent > 0.33) {
-        color = Phaser.Display.Color.Interpolate.ColorWithColor(
-            new Phaser.Display.Color(255, 255, 0),
-            new Phaser.Display.Color(255, 165, 0),
-            1,
-            (0.66 - percent) / 0.33
-        );
-    } else {
-        color = Phaser.Display.Color.Interpolate.ColorWithColor(
-            new Phaser.Display.Color(255, 165, 0),
-            new Phaser.Display.Color(255, 0, 0),
-            1,
-            (0.33 - percent) / 0.33
-        );
-    }
-
-    const hex = Phaser.Display.Color.GetColor(color.r, color.g, color.b);
-
     timeBarGfx.clear();
-    timeBarGfx.fillStyle(hex, 1);
-    timeBarGfx.fillRect(BAR_X, BAR_Y, width, 12);
+    timeBarGfx.lineStyle(2, 0xffffff);
+    timeBarGfx.strokeRect(BAR_X, BAR_Y, BAR_WIDTH, 14);
 
-    // viền trắng kiểu Pokémon
-    timeBarGfx.lineStyle(1, 0xffffff);
-    timeBarGfx.strokeRect(BAR_X, BAR_Y, BAR_WIDTH, 12);
+    if (percent > 0.5) timeBarGfx.fillStyle(0x00ff00);
+    else if (percent > 0.2) timeBarGfx.fillStyle(0xffff00);
+    else timeBarGfx.fillStyle(0xff0000);
 
-    // nhấp nháy khi sắp hết giờ
-    if (timeLeft <= 10) {
-        timeBarGfx.alpha = Math.sin(scene.time.now / 100) * 0.5 + 0.5;
-    } else {
-        timeBarGfx.alpha = 1;
-    }
+    timeBarGfx.fillRect(BAR_X, BAR_Y, BAR_WIDTH * percent, 14);
 }
 
 function updateTime() {
-    timeLeft--;
-    drawTimeBar(this);
+    if (timeLeft > 0) {
+        timeLeft--;
+        drawTimeBar(this);
+    } else {
+        timerEvent.remove();
+        lock = true;
+        this.add.text(180, 320, 'GAME OVER', { fontSize: '40px', color: '#f00', backgroundColor: '#000', padding: { x: 10, y: 10 } })
+            .setOrigin(0.5).setDepth(100);
 
-    if (timeLeft <= 0) {
-        gameOver.call(this);
+        // Dừng nhạc khi thua (tùy chọn)
+        this.sound.stopAll();
     }
 }
 
 // ================= GAME LOGIC =================
 function flipCard(card) {
-    if (lock || card.getData('flipped') || card.getData('removed') || timeLeft <= 0) return;
+    if (lock || card.getData('flipped') || card.getData('removed')) return;
+    if (first && second) return;
 
-    lock = true;
     card.setData('flipped', true);
 
-    flipAnimation(this, card, card.getData('value'), () => {
+    flipAnimation(this, card, card.getData('value'), null, () => {
         if (!first) {
             first = card;
-            lock = false;
             return;
         }
-
         second = card;
+        lock = true;
 
         if (first.getData('value') === second.getData('value')) {
+            // --- MATCH: Đúng cặp ---
+            this.sound.play('match');
+
             score += 10;
             matchedPairs++;
             scoreText.setText('Score: ' + score);
-            sfxMatch.play();
+            removePair(first, second);
+            if (matchedPairs === 15) {
+                this.add.text(180, 320, 'YOU WIN!', { fontSize: '40px', color: '#0f0', backgroundColor: '#000', padding: { x: 10, y: 10 } })
+                    .setOrigin(0.5).setDepth(100);
+                timerEvent.remove();
 
-            removePair.call(this, first, second);
-            resetTurn();
-
-            if (matchedPairs === 20) {
-                winGame.call(this);
+                // Dừng nhạc khi thắng
+                this.sound.stopAll();
+                // Nếu muốn có nhạc win thì thêm: this.sound.play('win');
             }
+            resetTurn();
         } else {
-            sfxWrong.play();
-            this.time.delayedCall(600, () => {
-                flipBack.call(this, first);
-                flipBack.call(this, second);
+            // --- WRONG: Sai cặp ---
+            this.sound.play('wrong');
+
+            this.time.delayedCall(800, () => {
+                flipBack(first);
+                flipBack(second);
                 resetTurn();
             });
         }
@@ -219,102 +263,76 @@ function flipCard(card) {
 }
 
 function flipBack(card) {
-    flipAnimation(this, card, 'back', () => {
-        card.setData('flipped', false);
-    });
+    if (!card.scene) return;
+    flipAnimation(
+        card.scene,
+        card,
+        card.getData('baseTexture'),
+        card.getData('baseFrame'),
+        () => card.setData('flipped', false)
+    );
 }
 
-function removePair(c1, c2) {
-    c1.setData('removed', true);
-    c2.setData('removed', true);
-
-    this.tweens.add({
-        targets: [c1, c2],
-        alpha: 0,
-        duration: 300,
+function flipAnimation(scene, card, texture, frame, onComplete) {
+    scene.tweens.add({
+        targets: card,
+        scaleX: 0,
+        duration: 150,
         onComplete: () => {
-            c1.destroy();
-            c2.destroy();
+            if (card.active) {
+                card.setTexture(texture, frame);
+                card.setDisplaySize(CELL, CELL);
+
+                const targetScaleX = card.scaleX;
+                card.scaleX = 0;
+
+                scene.tweens.add({
+                    targets: card,
+                    scaleX: targetScaleX,
+                    duration: 150,
+                    onComplete: onComplete
+                });
+            }
         }
     });
 }
 
+function removePair(a, b) {
+    a.setData('removed', true);
+    b.setData('removed', true);
+    a.scene.tweens.add({
+        targets: [a, b], alpha: 0, scale: 0.1, duration: 300,
+        onComplete: () => { a.destroy(); b.destroy(); }
+    });
+}
+
 function resetTurn() {
-    first = null;
-    second = null;
-    lock = false;
+    first = null; second = null; lock = false;
 }
 
 // ================= HINT =================
 function useHint() {
-    if (hintLeft <= 0 || lock) return;
-
-    const cards = this.children.list.filter(c =>
-        c instanceof Phaser.GameObjects.Image &&
-        c.getData &&
-        c.getData('value') &&
-        !c.getData('removed') &&
-        !c.getData('flipped')
-    );
-
+    if (hintLeft <= 0 || lock || first) return;
+    const cards = this.children.list.filter(c => c.type === 'Image' && c.getData && !c.getData('removed') && !c.getData('flipped'));
 
     for (let i = 0; i < cards.length; i++) {
         for (let j = i + 1; j < cards.length; j++) {
             if (cards[i].getData('value') === cards[j].getData('value')) {
                 hintLeft--;
                 hintText.setText(`Hint: ${hintLeft}`);
+                lock = true;
 
-                flipAnimation(this, cards[i], cards[i].getData('value'));
-                flipAnimation(this, cards[j], cards[j].getData('value'));
+                // Gợi ý cũng phát tiếng lật thẻ (nếu có), tạm thời chưa thêm
+                flipAnimation(this, cards[i], cards[i].getData('value'), null);
+                flipAnimation(this, cards[j], cards[j].getData('value'), null);
 
-                this.time.delayedCall(800, () => {
-                    flipBack.call(this, cards[i]);
-                    flipBack.call(this, cards[j]);
+                this.time.delayedCall(1000, () => {
+                    flipBack(cards[i]);
+                    flipBack(cards[j]);
+                    lock = false;
                 });
                 return;
             }
         }
     }
-}
-
-// ================= FLIP ANIMATION =================
-function flipAnimation(scene, card, newTexture, onComplete) {
-    scene.tweens.add({
-        targets: card,
-        scaleX: 0,
-        duration: 150,
-        onComplete: () => {
-            card.setTexture(newTexture);
-            fitToCell(card, CELL);
-            scene.tweens.add({
-                targets: card,
-                scaleX: card.scale,
-                duration: 150,
-                onComplete
-            });
-        }
-    });
-}
-
-// ================= END =================
-function winGame() {
-    timerEvent.remove();
-    bgm.stop();
-
-    this.add.rectangle(180, 320, 360, 640, 0x000000, 0.75);
-    this.add.text(180, 280, 'BẠN THẮNG 🎉', {
-        fontSize: '22px',
-        fill: '#00ffcc'
-    }).setOrigin(0.5);
-}
-
-function gameOver() {
-    timerEvent.remove();
-    bgm.stop();
-
-    this.add.rectangle(180, 320, 360, 640, 0x000000, 0.75);
-    this.add.text(180, 280, 'HẾT GIỜ ⏰', {
-        fontSize: '22px',
-        fill: '#ff5555'
-    }).setOrigin(0.5);
 }
